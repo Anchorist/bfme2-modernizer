@@ -4,8 +4,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 git submodule update --init upstream
-# Only this level: Open-BFME-1 references Open-BFME-2 in turn.
-git -C upstream submodule update --init reference/open-bfme-1
+# Only this level (Open-BFME-1 references Open-BFME-2 in turn), and only the
+# pinned commit: its full history is several GB.
+git -C upstream submodule update --init --depth 1 reference/open-bfme-1
 patch="$PWD/patches/modern-variant.patch"
 if git -C upstream apply --check --reverse "$patch" 2>/dev/null; then
     echo "modern variant already applied"
