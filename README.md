@@ -35,6 +35,7 @@ Set these as environment variables before starting the game:
 | Variable | Effect |
 | --- | --- |
 | `BFME2_MODERN_FPS` | presentation rate, default 120; `0` follows the display; `legacy` turns it off |
+| `BFME2_MODERN_INTERPOLATE=0` | present at the modern rate but show only the latest update (no smoothing), for comparisons |
 | `BFME2_MODERN_HUD=stretch` | retail's stretched HUD |
 | `BFME2_MODERN_HUD=4:3` or `16:9` | 1.09 and RotWK: the HUD box's shape. 1.09's HUD art is drawn for 16:9, so 1.09 defaults to 16:9 and RotWK to 4:3 |
 | `BFME2_MODERN_HUD_EDGES=0` | keep the palantir and side bar in the centred HUD box |

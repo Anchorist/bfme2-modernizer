@@ -338,7 +338,7 @@ index 00000000000..9829ecda2e5
 +
 +#endif
 diff --git a/Code/GameEngine/Source/Common/GameEngineExecuteRva0022D290.cpp b/Code/GameEngine/Source/Common/GameEngineExecuteRva0022D290.cpp
-index d57dfb120c3..cde41861bf2 100644
+index d57dfb120c3..ec7a4f27ae6 100644
 --- a/Code/GameEngine/Source/Common/GameEngineExecuteRva0022D290.cpp
 +++ b/Code/GameEngine/Source/Common/GameEngineExecuteRva0022D290.cpp
 @@ -15,6 +15,11 @@
@@ -353,7 +353,7 @@ index d57dfb120c3..cde41861bf2 100644
  #include "../../../Libraries/Source/profile/profile.h"
  void _bfme_debugRecordCallsite(int);
  #include "../../Include/GameClient/TreeHintOpaque0043671B.h"
-@@ -356,6 +361,71 @@ class GameEngine
+@@ -356,6 +361,74 @@ class GameEngine
   manager->beginReport();manager=DEBUG_MANAGER; \
   CrashMessage *message=manager->getCrashMessage(0,0,0); \
   message->setText(reason)->show(true); } while(0)
@@ -403,6 +403,9 @@ index d57dfb120c3..cde41861bf2 100644
 + if(state && FAILED(flush()))state=0;
 +}
 +static bool g_modernDisplaySynced=false;
++// BFME2_MODERN_INTERPOLATE=0 presents at the modern rate but always shows the
++// latest client update, as a plain frame-rate unlock would (for comparisons).
++static bool g_modernInterpolate=true;
 +static void modernDrawIfDue(ModernFrameSchedule &clock)
 +{
 + if(g_modernDisplaySynced)modernWaitForCompositor();
@@ -412,7 +415,7 @@ index d57dfb120c3..cde41861bf2 100644
 + if(!clock.renderDue())return;
 + try {
 +  ModernRenderScope phase(MODERN_RENDER_PRESENT);
-+  g_modernVisualAlpha=clock.visualInterpolation(now.QuadPart);
++  g_modernVisualAlpha=g_modernInterpolate ? clock.visualInterpolation(now.QuadPart) : 1.0f;
 +  modernTrace('P',g_modernVisualAlpha,0,0,0);
 +  modernPresentFrame();
 +  modernTrace('Q',0,0,0,0);
@@ -425,7 +428,7 @@ index d57dfb120c3..cde41861bf2 100644
  void GameEngine::rva0022D290()
  
  {
-@@ -401,14 +471,50 @@ void GameEngine::rva0022D290()
+@@ -401,14 +474,52 @@ void GameEngine::rva0022D290()
    }
    
   }
@@ -440,6 +443,8 @@ index d57dfb120c3..cde41861bf2 100644
 +  if(end!=fpsOption && *end=='\0' && value>=0 && value<=1000)renderRate=(int)value;
 + }
 + g_modernDisplaySynced=modernFPS && renderRate==0;
++ const char *interpolateOption=getenv("BFME2_MODERN_INTERPOLATE");
++ g_modernInterpolate=!(interpolateOption && strcmp(interpolateOption,"0")==0);
 + LARGE_INTEGER frequency, counter;
 + QueryPerformanceFrequency(&frequency);
 + QueryPerformanceCounter(&counter);
@@ -477,7 +482,7 @@ index d57dfb120c3..cde41861bf2 100644
     Profile::StopRange(0);
     
    }
-@@ -508,6 +614,9 @@ void GameEngine::rva0022D290()
+@@ -508,6 +619,9 @@ void GameEngine::rva0022D290()
     {
      do
      {
