@@ -11,4 +11,8 @@ scripts/prepare.sh
     python tools/build.py "${sources[@]}"
     python tools/build_variant.py --compile "${sources[@]}" > /dev/null
 )
-python builder/modern_blob.py --out build/blob
+python builder/modern_blob.py --target bfme2-106 --loader --out build/blob
+# The RotWK 2.01-engine targets replay their recorded descriptions (targets/).
+for target in bfme2-109 rotwk-201; do
+    python builder/modern_blob.py --target "$target" --out build/blob
+done

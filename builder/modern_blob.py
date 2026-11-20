@@ -340,12 +340,16 @@ class Image:
                 return slots.pop()
         return None
 
-    def winmain_call(self, winmain):
-        """Offset from the entry of the CRT entry's single call to WinMain."""
+    def entry_calls(self):
+        """(offset from the entry, target) of each call in the CRT entry's first 0x400 bytes."""
         e = BASE + self.entry
         b = self.read(self.entry, 0x400)
-        calls = [k for k in range(0x3FB) if b[k] == 0xE8 and
-                 (e + k + 5 + struct.unpack_from("<i", b, k + 1)[0]) & 0xFFFFFFFF == winmain]
+        return [(k, (e + k + 5 + struct.unpack_from("<i", b, k + 1)[0]) & 0xFFFFFFFF)
+                for k in range(0x3FB) if b[k] == 0xE8]
+
+    def winmain_call(self, winmain):
+        """Offset from the entry of the CRT entry's single call to WinMain."""
+        calls = [k for k, t in self.entry_calls() if t == winmain]
         if len(calls) != 1:
             raise ValueError(f"the CRT entry has {len(calls)} calls to WinMain")
         return calls[0]
@@ -459,11 +463,12 @@ def eh_of_changed(o, name):
 
 
 class Linker:
-    def __init__(self, pairs, crt_objects, image, ledger):
-        """pairs: [(source, modern Obj with .changed, reference Obj)]."""
-        self.image = image
+    def __init__(self, pairs, crt_objects, target, ledger):
+        """pairs: [(source, modern Obj with .changed, reference Obj)]; target: Retail106, Engine or Replay."""
+        self.target = target
         self.names, self.by_src, self.folds = ledger
-        self.base = (BASE + image.size_of_image + 0xFFFF) & ~0xFFFF  # VirtualAlloc granularity
+        target.attach(self)
+        self.base = (BASE + target.size_of_image + 0xFFFF) & ~0xFFFF  # VirtualAlloc granularity
         self.objs = []
         for src, m, r in pairs:
             defined = {s.name for s in r.symbols.values() if s.section > 0}
@@ -496,15 +501,12 @@ class Linker:
         self.rows_at = defaultdict(set)
         for (name, _), row in self.by_src.items():
             self.rows_at[row[0]].add(name)
-        self.corr_name, self.corr_loc = correspondence([(src, r) for src, _, r in pairs], image, self.code_va)
+        self.corr_name, self.corr_loc = target.correspondence([(src, r) for src, _, r in pairs])
         self.thunks, self.warnings, self.unresolved = {}, [], defaultdict(list)
         self.included, self.seen, self.queue, self.edges = [], set(), [], {}
 
     def code_va(self, name, src, size=None):
-        row = self.by_src.get((name, norm_src(src)))
-        if row and row[3] == "matched" and (size is None or row[2] == size):
-            return BASE + row[0]
-        return None
+        return self.target.code_va(name, src, size)
 
     def chunk_at(self, o, sec, off):
         lst = self.chunks[(id(o), sec)]
@@ -518,14 +520,14 @@ class Linker:
         return ("chunk", c, s.value - c.start)
 
     def retail_of(self, o, s):
-        """Ledger address of a symbol; a static only binds to a row of its own file."""
+        """Ledger (1.06) address of a symbol in the target; a static only binds to a row of its own file."""
         m = GNAME.match(s.name)
         if m and s.external:
-            return int(m.group(1), 16)
+            return self.target.translate(int(m.group(1), 16))
         e = self.names.get(s.name)
         if not e or (s.sclass == 3 and (not e[4] or norm_src(e[4]) != norm_src(o.source))):
             return None
-        return BASE + e[0]
+        return self.target.retail_address(s.name, e)
 
     def retail_static(self, o, s):
         r = self.ref_of.get(id(o))
@@ -556,7 +558,7 @@ class Linker:
         if s.name in self.corr_name:  # what retail's own matched code references
             return ("va", self.corr_name[s.name])
         if s.name.startswith("__imp_"):
-            slot = self.image.import_slot(s.name)
+            slot = self.target.import_slot(s.name)
             if slot is not None:
                 return ("va", slot)
         elif s.name in ABS:
@@ -567,7 +569,7 @@ class Linker:
             r = self.retail_of(o, s)
             if r is not None:
                 return ("va", r)
-            slot = self.image.import_slot("__imp_" + s.name) if s.section == 0 and s.name.startswith("_") else None
+            slot = self.target.import_slot("__imp_" + s.name) if s.section == 0 and s.name.startswith("_") else None
             if slot is not None:
                 # a C runtime function retail imports: a jmp [IAT] thunk in the blob
                 if s.name not in self.thunks:
@@ -611,7 +613,10 @@ class Linker:
                     raise ValueError(f"changed function {name} is an ICF fold: the jump would reach its twins")
                 for other in sorted(self.rows_at[row[0]] - {name}):
                     self.warnings.append(f"{name} is also reconstructed as {other}; the jump serves both")
-                hooks.append((BASE + row[0], c, off, name))
+                hva = self.target.code_va(name, o.source)
+                if hva is None:
+                    raise ValueError(f"changed function {name} is not found in the target")
+                hooks.append((hva, c, off, name))
             for s in o.run_inits:
                 self.need(self.at(o, s)[1])
             for idx, sec in o.sections.items():
@@ -697,9 +702,7 @@ class Linker:
         lists, sites = self.relocate(memory)
 
         # init stub: call each modern-only initialiser, then continue to WinMain
-        k = self.image.winmain_call(BASE + self.names["_WinMain@16"][0])
-        entry_site = BASE + self.image.entry + k + 1
-        entry_orig = struct.unpack_from("<I", self.image.read(self.image.entry + k + 1, 4))[0]
+        entry_site, entry_orig = self.target.winmain_call(BASE + self.names["_WinMain@16"][0])
         winmain = (entry_site + 4 + entry_orig) & 0xFFFFFFFF
         stub = bytearray()
         for _, c, off in self.inits:
@@ -711,11 +714,11 @@ class Linker:
 
         runs = data_runs(bytes(memory))
         tls_start, tls_end = self.tls
-        blob = (HEADER.pack(b"BFME2MDL", BLOB_VERSION, hashlib.sha256(self.image.raw).digest(),
+        blob = (HEADER.pack(b"BFME2MDL", BLOB_VERSION, self.target.sha256,
                             self.base, self.size, len(runs), self.tls_index_va, tls_start or 0,
                             (tls_end - tls_start) if tls_start else 0, entry_site, entry_orig, self.stub_va,
                             len(hooks), len(lists["abs"]), len(lists["rel"]), len(lists["secrel"]))
-                + b"".join(HOOK.pack(hva, c.va + off, self.image.read(hva - BASE, 5)) for hva, c, off, _ in hooks)
+                + b"".join(HOOK.pack(hva, c.va + off, self.target.hook_bytes(hva)) for hva, c, off, _ in hooks)
                 + b"".join(struct.pack(f"<{len(v)}I", *v) for v in lists.values())
                 + b"".join(struct.pack("<II", o, len(b)) + b for o, b in runs))
         report = {"base": self.base, "size": self.size, "hooks": [[hva, name] for hva, _, _, name in hooks],
@@ -817,11 +820,11 @@ def crt_helpers():
     raise ValueError("msvcrt.lib has no dll_obj/llrem.obj")
 
 
-def build_blob(out_dir, *, root=ROOT):
+def object_pairs(sources, root=ROOT):
+    """(source, modern path, reference path) of the 1.06 build: verified reference objects."""
     import build
-    sources = modern_sources(root)
     context = build.CompilationContext()
-    pairs = []
+    out = []
     for name in sources:
         source = (root / name).resolve(strict=True)
         reference = build.obj_path(source)
@@ -830,6 +833,17 @@ def build_blob(out_dir, *, root=ROOT):
             raise ValueError(f"reference object is absent or stale (./build.sh {name}): {reference}")
         if not build.compile_is_current(source, modern, strict=True, context=context):
             raise ValueError(f"modern object is absent or stale (build.sh --variant modern --compile): {name}")
+        out.append((name, modern, reference))
+    return out
+
+
+def build_blob(out_dir, target=None, *, root=ROOT):
+    """Link the blob for a target (default 1.06); returns its path and report."""
+    target = target or TARGETS["bfme2-106"]
+    sources = modern_sources(root)
+    pairs = []
+    for name, modern, reference in (object_pairs(sources, root) if target.name == "bfme2-106"
+                                    else target.compile(sources, root)):
         m = read_coff(modern.read_bytes(), modern)
         r = read_coff(reference.read_bytes(), reference)
         data = changed_data(m, r)
@@ -837,17 +851,18 @@ def build_blob(out_dir, *, root=ROOT):
             raise ValueError(f"{name}: the modern variant changes data, which the blob cannot replace: {data}")
         m.changed = set(changed_functions(m, r))
         pairs.append((name, m, r))
-    raw = BASELINE.read_bytes()
-    image = Image(raw)
-    blob, report, sites = Linker(pairs, crt_helpers(), image, load_ledger(image.size_of_image, root)).link()
+    retail = Image(BASELINE.read_bytes())
+    ledger = load_ledger(retail.size_of_image, root)
+    blob, report, sites = Linker(pairs, crt_helpers(), target.open(retail, pairs), ledger).link()
     checked = check_relocation(blob, sites)
+    target.save()
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "bfme2-modern-106.blob"
+    path = out_dir / target.blob
     path.write_bytes(blob)
-    report.update(sources=sources, relocation_sites_checked=checked,
-                  baseline_sha256=hashlib.sha256(raw).hexdigest(), blob_sha256=hashlib.sha256(blob).hexdigest(),
+    report.update(target=target.name, sources=sources, relocation_sites_checked=checked,
+                  game_sha256=target.sha256_hex, blob_sha256=hashlib.sha256(blob).hexdigest(),
                   changed={name: sorted(m.changed) for name, m, _ in pairs if m.changed})
-    (out_dir / "blob_report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    (out_dir / f"blob_report-{target.name}.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return path, report
 
 
@@ -878,18 +893,397 @@ def build_loader(out_dir):
     return dll
 
 
+# ---------------------------------------------------------------- targets
+# The ledger and the reference objects describe 1.06. The RotWK 2.01 engine (its
+# own game.dat, and the community BFME II 1.09's) holds the same functions at
+# other addresses, with a few longer classes (patches/layout-201.patch). Its
+# game.dat cannot be shipped, so `--describe GAME_DAT` links once against it and
+# records every address and byte the link read in targets/<name>.json; every
+# later build replays that record and needs no game.dat.
+TARGETS_DIR = HERE / "targets"
+
+
+class StaleDescription(ValueError):
+    pass
+
+
+class Retail106:
+    """The 1.06 baseline game.dat: ledger addresses are its addresses."""
+
+    def __init__(self, image):
+        self.image = image
+        self.size_of_image = image.size_of_image
+        self.sha256 = hashlib.sha256(image.raw).digest()
+
+    def attach(self, linker):
+        self.by_src = linker.by_src
+
+    def correspondence(self, pairs):
+        return correspondence(pairs, self.image, self.code_va)
+
+    def code_va(self, name, src, size=None):
+        row = self.by_src.get((name, norm_src(src)))
+        if row and row[3] == "matched" and (size is None or row[2] == size):
+            return BASE + row[0]
+        return None
+
+    def translate(self, va):
+        return va
+
+    def retail_address(self, name, row):
+        return BASE + row[0]
+
+    def import_slot(self, symbol):
+        return self.image.import_slot(symbol)
+
+    def winmain_call(self, winmain):
+        k = self.image.winmain_call(winmain)
+        return BASE + self.image.entry + k + 1, struct.unpack_from("<I", self.image.read(self.image.entry + k + 1, 4))[0]
+
+    def hook_bytes(self, hva):
+        return self.image.read(hva - BASE, 5)
+
+
+def masked_pattern(body, masked, lo, hi):
+    return re.compile(b"".join(b"." if k in masked else re.escape(body[k:k + 1]) for k in range(lo, hi)),
+                      re.DOTALL)
+
+
+def relocation_mask(section, a, b):
+    out = set()
+    for off, _, _ in section.relocs:
+        if a <= off < b:
+            out.update(range(off - a, off - a + 4))
+    return out
+
+
+def layout_map(pairs, image, by_src):
+    """{name|source: {"va", "size", "diffs" or "cands"}} for each matched reference function
+    of at least 12 bytes, found in the target's .text by its bytes (relocations wildcarded).
+    A function found only by 16-byte anchors gets the instruction differences, so a
+    function whose code changed is never taken for its 1.06 self."""
+    import capstone
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+    number = re.compile(r"\b(0x[0-9a-f]+|\d+)\b")
+    text = next(s for s in image.sections if s[1] <= image.entry < s[1] + s[0])
+    tbase, tdata = BASE + text[1], image.read(text[1], text[2])
+
+    def norm(code, va, relocs=()):
+        out = []
+        for i in md.disasm(code, va):
+            rel = i.address - va
+            relocated = any(rel <= r < rel + i.size for r in relocs)
+            out.append((number.sub(lambda m: "A" if int(m.group(1), 0) >= 0x400000 or
+                                   (relocated and int(m.group(1), 0) == 0) else m.group(1),
+                                   f"{i.mnemonic} {i.op_str}"), rel, f"{i.mnemonic} {i.op_str}"))
+        return out
+
+    out = {}
+    for src, r in pairs:
+        for sec, a, b, f in functions(r):
+            row = by_src.get((f.name, norm_src(src)))
+            if helper(f.name) or b - a < 12 or not row or row[3] != "matched":
+                continue
+            s, n, key = r.sections[sec], b - a, f.name + "|" + src
+            body, masked = s.data[a:b], relocation_mask(s, a, b)
+            hits = [m.start() for m in masked_pattern(body, masked, 0, n).finditer(tdata)]
+            if len(hits) == 1:
+                out[key] = {"va": tbase + hits[0], "size": n, "diffs": []}
+                continue
+            if hits:
+                out[key] = {"va": None, "cands": [tbase + h for h in hits], "size": n, "diffs": []}
+                continue
+            votes = {}
+            for st in range(0, max(1, n - 16), max(4, n // 24)):
+                found = [m.start() - st for m in masked_pattern(body, masked, st, st + 16).finditer(tdata)]
+                if len(found) == 1:
+                    votes[found[0]] = votes.get(found[0], 0) + 1
+            if not votes:
+                out[key] = {"va": None, "size": n, "diffs": None}
+                continue
+            start = max(votes, key=votes.get)
+            mine = norm(body, 0x10000000, [off - a for off, _, _ in s.relocs if a <= off < b])
+            theirs = norm(tdata[start:start + n + 64], tbase + start)
+            import difflib
+            sm = difflib.SequenceMatcher(None, [x[0] for x in mine], [x[0] for x in theirs], autojunk=False)
+            diffs = []
+            for tag, i1, i2, j1, j2 in sm.get_opcodes():
+                if tag == "equal":
+                    continue
+                if tag == "insert" and i1 == len(mine):
+                    break
+                diffs.append({"tag": tag, "ref": [x[2] for x in mine[i1:i2]], "target": [x[2] for x in theirs[j1:j2]]})
+            out[key] = {"va": tbase + start, "size": n, "diffs": diffs}
+    return out
+
+
+class Engine(Retail106):
+    """A RotWK 2.01-engine game.dat: 1.06 addresses translated through the layout map,
+    and ledger functions outside the map found by their 1.06 bytes."""
+
+    def __init__(self, image, retail, pairs):
+        super().__init__(image)
+        self.retail, self.pairs = retail, pairs
+
+    def attach(self, linker):
+        super().attach(linker)
+        self.layout = layout_map(self.pairs, self.image, self.by_src)
+        self.v106 = {}
+        for key, v in self.layout.items():
+            row = self.by_src.get(tuple_key(key))
+            if row and v.get("va") and not v.get("diffs"):
+                self.v106[BASE + row[0]] = v["va"]
+        # an ambiguous twin: the one candidate between the found neighbours (order is kept)
+        found = sorted(self.v106.items())
+        for key, v in self.layout.items():
+            row = self.by_src.get(tuple_key(key))
+            if v.get("va") or not v.get("cands") or not row:
+                continue
+            a = BASE + row[0]
+            lo = max((t for s, t in found if s < a), default=0)
+            hi = min((t for s, t in found if s > a), default=1 << 32)
+            inside = [c for c in v["cands"] if lo < c < hi]
+            if len(inside) == 1:
+                v["va"] = self.v106[a] = inside[0]
+        text = next(s for s in self.image.sections if s[1] <= self.image.entry < s[1] + s[0])
+        self.text = (BASE + text[1], self.image.read(text[1], text[2]))
+
+    def code_va(self, name, src, size=None):
+        v = self.layout.get(name + "|" + src)
+        if v and v.get("va") and not v.get("diffs") and (size is None or v["size"] == size):
+            return v["va"]
+        return None
+
+    def translate(self, va):
+        return self.v106.get(va)
+
+    def retail_address(self, name, row):
+        va = self.translate(BASE + row[0])
+        return va if va is not None else self.find(name, row)
+
+    def find(self, name, row):
+        """A ledger function outside the map, by its 1.06 bytes (relocations wildcarded when
+        its verified object is at hand)."""
+        if row[1] != "code" or not row[2]:
+            return None
+        body = self.retail.read(row[0], row[2])
+        masked = set()
+        obj = self.reference_object(row[4])
+        if obj:
+            for sec, a, b, f in functions(obj):
+                if f.name == name and b - a == row[2]:
+                    masked = relocation_mask(obj.sections[sec], a, b)
+        tbase, tdata = self.text
+        hits = [m.start() for m in masked_pattern(body, masked, 0, len(body)).finditer(tdata)]
+        return tbase + hits[0] if len(hits) == 1 else None
+
+    def reference_object(self, source):
+        """The 1.06 object of a ledger source (for its relocation sites), compiled on demand."""
+        if not source:
+            return None
+        cache = self.__dict__.setdefault("objects", {})
+        if source not in cache:
+            import build
+            path = (ROOT / source).resolve()
+            obj = build.obj_path(path)
+            if path.suffix.lower() not in (".c", ".cpp"):
+                obj = None
+            elif not obj.exists():
+                obj = ROOT / "build/targets/find" / obj.name
+                obj.parent.mkdir(parents=True, exist_ok=True)
+                cmd, env = build.compiler_command(path, obj)
+                if subprocess.run(cmd, env=env, cwd=ROOT, capture_output=True).returncode or not obj.exists():
+                    obj = None
+            cache[source] = read_coff(obj.read_bytes(), obj) if obj else None
+        return cache[source]
+
+    def winmain_call(self, winmain):
+        """The CRT entry is the same code in every build: the call at 1.06's WinMain offset."""
+        k = self.retail.winmain_call(winmain)
+        if k not in dict(self.image.entry_calls()):
+            raise ValueError("the target's CRT entry has no call at 1.06's WinMain offset")
+        return BASE + self.image.entry + k + 1, struct.unpack_from("<I", self.image.read(self.image.entry + k + 1, 4))[0]
+
+
+def tuple_key(key):
+    name, src = key.split("|", 1)
+    return name, norm_src(src)
+
+
+class Recorder:
+    """Passes every call through to a target and keeps what it answered."""
+
+    def __init__(self, inner):
+        self.inner, self.facts = inner, {}
+        self.size_of_image, self.sha256 = inner.size_of_image, inner.sha256
+
+    def attach(self, linker):
+        self.inner.attach(linker)
+
+    def _keep(self, key, value):
+        self.facts[key] = value
+        return value
+
+    def correspondence(self, pairs):
+        by_name, by_loc = self.inner.correspondence(pairs)
+        src_of = {id(r): src for src, r in pairs}
+        self.facts["correspondence"] = {"names": by_name,
+                                        "locations": sorted([src_of[o], sec, off, va] for (o, sec, off), va in by_loc.items())}
+        return by_name, by_loc
+
+    def code_va(self, name, src, size=None):
+        return self._keep(f"code|{name}|{src}|{size}", self.inner.code_va(name, src, size))
+
+    def translate(self, va):
+        return self._keep(f"translate|{va}", self.inner.translate(va))
+
+    def retail_address(self, name, row):
+        return self._keep(f"address|{name}", self.inner.retail_address(name, row))
+
+    def import_slot(self, symbol):
+        return self._keep(f"import|{symbol}", self.inner.import_slot(symbol))
+
+    def winmain_call(self, winmain):
+        return tuple(self._keep(f"winmain|{winmain}", list(self.inner.winmain_call(winmain))))
+
+    def hook_bytes(self, hva):
+        return bytes.fromhex(self._keep(f"hook|{hva}", self.inner.hook_bytes(hva).hex()))
+
+    def description(self):
+        return {"sha256": self.sha256.hex(), "size_of_image": self.size_of_image,
+                **{k: self.facts[k] for k in sorted(self.facts)}}
+
+
+class Replay:
+    """Answers from a recorded description; a question it was never asked means the
+    modern code changed what it needs from the game.dat: describe the target again."""
+
+    def __init__(self, description, path):
+        self.d, self.path = description, path
+        self.size_of_image, self.sha256 = description["size_of_image"], bytes.fromhex(description["sha256"])
+
+    def attach(self, linker):
+        pass
+
+    def _get(self, key):
+        if key not in self.d:
+            raise StaleDescription(f"{self.path.name} has no record of {key}: run --describe with that game.dat")
+        return self.d[key]
+
+    def correspondence(self, pairs):
+        corr = self._get("correspondence")
+        ids = {src: id(r) for src, r in pairs}
+        return dict(corr["names"]), {(ids[src], sec, off): va for src, sec, off, va in corr["locations"]}
+
+    def code_va(self, name, src, size=None):
+        return self._get(f"code|{name}|{src}|{size}")
+
+    def translate(self, va):
+        return self._get(f"translate|{va}")
+
+    def retail_address(self, name, row):
+        return self._get(f"address|{name}")
+
+    def import_slot(self, symbol):
+        return self._get(f"import|{symbol}")
+
+    def winmain_call(self, winmain):
+        return tuple(self._get(f"winmain|{winmain}"))
+
+    def hook_bytes(self, hva):
+        return bytes.fromhex(self._get(f"hook|{hva}"))
+
+
+@dataclass
+class Target:
+    name: str
+    blob: str
+    defines: tuple = ()
+    game: Path = None  # set by describe()
+    recorder: Recorder = None
+
+    @property
+    def description_path(self):
+        return TARGETS_DIR / f"{self.name}.json"
+
+    def compile(self, sources, root=ROOT):
+        """Reference and modern objects with this target's defines, under build/targets/<name>/."""
+        import build
+        import concurrent.futures
+        out = root / "build/targets" / self.name
+
+        def one(job):
+            name, variant = job
+            source = (root / name).resolve(strict=True)
+            obj = out / variant / build.obj_path(source).name
+            obj.parent.mkdir(parents=True, exist_ok=True)
+            obj.unlink(missing_ok=True)
+            cmd, env = build.compiler_command(source, obj)
+            i = next(k for k, a in enumerate(cmd) if a.startswith("-Fo"))
+            cmd[i:i] = ["-D" + d for d in self.defines] + (["-DBFME2_MODERN=1"] if variant == "modern" else [])
+            r = subprocess.run(cmd, env=env, cwd=root, capture_output=True, text=True)
+            if r.returncode or not obj.exists():
+                raise ValueError(f"{variant} compile of {name} failed:\n{r.stdout[-2000:]}{r.stderr[-1000:]}")
+            return obj
+
+        with concurrent.futures.ThreadPoolExecutor(8) as pool:
+            objs = list(pool.map(one, [(s, v) for s in sources for v in ("modern", "ref")]))
+        return [(s, objs[2 * k], objs[2 * k + 1]) for k, s in enumerate(sources)]
+
+    def open(self, retail, pairs):
+        if self.name == "bfme2-106":
+            target = Retail106(retail)
+        elif self.game:
+            raw = self.game.read_bytes()
+            target = self.recorder = Recorder(Engine(Image(raw), retail, [(src, r) for src, _, r in pairs]))
+        else:
+            target = Replay(json.loads(self.description_path.read_text(encoding="utf-8")), self.description_path)
+        self.sha256_hex = target.sha256.hex()
+        return target
+
+    def describe(self, game):
+        if self.name == "bfme2-106":
+            raise ValueError("bfme2-106 links against upstream's baseline; it needs no description")
+        self.game = Path(game)
+
+    def save(self):
+        """After a describing link: write the record."""
+        if self.recorder:
+            TARGETS_DIR.mkdir(exist_ok=True)
+            self.description_path.write_text(json.dumps(self.recorder.description(), indent=1, sort_keys=True) + "\n",
+                                             encoding="utf-8")
+            self.game = self.recorder = None
+
+
+TARGETS = {t.name: t for t in (
+    Target("bfme2-106", "bfme2-modern-106.blob"),
+    Target("bfme2-109", "bfme2-modern-109.blob", ("BFME2_LAYOUT_201", "BFME2_HUD_169")),
+    Target("rotwk-201", "bfme2-modern-rotwk-201.blob", ("BFME2_LAYOUT_201",)),
+)}
+
+
 def main(argv=None):
     import argparse
-    parser = argparse.ArgumentParser(description="Link the blob and build dinput8.dll.")
+    parser = argparse.ArgumentParser(description="Link a target's blob; build dinput8.dll.")
+    parser.add_argument("--target", choices=sorted(TARGETS), default="bfme2-106")
+    parser.add_argument("--describe", type=Path, metavar="GAME_DAT",
+                        help="link against this game.dat and write targets/<target>.json (not for bfme2-106)")
+    parser.add_argument("--loader", action="store_true", help="also build dinput8.dll")
     parser.add_argument("--out", type=Path, default=HERE / "build/blob")
     args = parser.parse_args(argv)
-    blob, report = build_blob(args.out)
-    dll = build_loader(args.out)
-    print(json.dumps({"blob": str(blob), "loader": str(dll), "hooks": len(report["hooks"]),
-                      "size": report["size"], "relocation_sites_checked": report["relocation_sites_checked"],
-                      "warnings": report["warnings"]}, indent=2))
+    target = TARGETS[args.target]
+    if args.describe:
+        target.describe(args.describe)
+        described = build_blob(args.out, target)[0].read_bytes()
+    blob, report = build_blob(args.out, target)
+    if args.describe and blob.read_bytes() != described:
+        raise SystemExit(f"replaying {target.description_path.name} gives another blob")
+    summary = {"target": target.name, "blob": str(blob), "hooks": len(report["hooks"]), "size": report["size"],
+               "relocation_sites_checked": report["relocation_sites_checked"], "warnings": report["warnings"]}
+    if args.loader:
+        summary["loader"] = str(build_loader(args.out))
+    print(json.dumps(summary, indent=2))
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

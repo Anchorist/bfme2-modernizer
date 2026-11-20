@@ -72,3 +72,18 @@ def test_modern_sources_are_the_files_that_name_the_variant():
     assert sources == sorted(sources)
     for name in sources:
         assert "BFME2_MODERN" in (mb.ROOT / name).read_text(encoding="utf-8", errors="replace")
+
+
+def test_replay_refuses_a_question_the_description_never_answered():
+    replay = mb.Replay({"sha256": "00" * 32, "size_of_image": 0x1000, "import|__imp__exit": 0x401000},
+                       Path("rotwk-201.json"))
+    assert replay.import_slot("__imp__exit") == 0x401000
+    with pytest.raises(mb.StaleDescription, match="--describe"):
+        replay.import_slot("__imp__abort")
+
+
+def test_every_target_but_106_has_a_description():
+    for name, target in mb.TARGETS.items():
+        assert target.blob.startswith("bfme2-modern-")
+        if name != "bfme2-106":
+            assert target.description_path.exists(), name

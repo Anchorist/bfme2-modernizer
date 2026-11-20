@@ -1,4 +1,4 @@
-/* BFME II modernizer loader; tools/modern_blob.py builds it and its blob.
+/* BFME II modernizer loader; builder/modern_blob.py builds it and its blobs.
  *
  * Built as dinput8.dll and placed in the game folder. game.dat imports one
  * function from dinput8.dll (DirectInput8Create), so Windows loads this DLL

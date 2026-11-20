@@ -1,9 +1,10 @@
 name: Build
 
-# Builds the 1.06 modernizer (dinput8.dll and its blob) on every push and pull
-# request, and publishes a release for a v* tag. upstream/ is Open-BFME-2 at
-# the pinned commit; its Open-BFME-1 submodule carries the VC7.1 toolchain the
-# reference and modern objects compile with.
+# Builds the modernizer (dinput8.dll and a blob for each game.dat) on every
+# push and pull request, and publishes a release for a v* tag. upstream/ is
+# Open-BFME-2 at the pinned commit; its Open-BFME-1 submodule carries the VC7.1
+# toolchain the reference and modern objects compile with. The 1.09 and RotWK
+# blobs replay targets/*.json, so no game.dat beyond upstream's 1.06 is needed.
 on:
   push:
     branches: [main]
@@ -43,21 +44,24 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          # modernizer-v0.7.0-bfme2-1.06 for a tag, modernizer-main-bfme2-1.06 otherwise
-          name="modernizer-${GITHUB_REF_NAME//\//-}-bfme2-1.06"
-          mkdir -p "dist/$name"
-          cp build/blob/dinput8.dll build/blob/bfme2-modern-106.blob README.md "dist/$name/"
-          (cd "dist/$name" && sha256sum dinput8.dll bfme2-modern-106.blob README.md > SHA256SUMS)
-          cp build/blob/blob_report.json dist/
-          (cd dist && python -m zipfile -c "$name.zip" "$name")
-          echo "PACKAGE=$name" >> "$GITHUB_ENV"
+          # modernizer-v0.7.0-bfme2-106.zip for a tag, modernizer-main-bfme2-106.zip otherwise
+          version="${GITHUB_REF_NAME//\//-}"
+          for pair in bfme2-106:bfme2-modern-106 bfme2-109:bfme2-modern-109 rotwk-201:bfme2-modern-rotwk-201; do
+            target="${pair%%:*}" blob="${pair#*:}.blob"
+            name="modernizer-$version-$target"
+            mkdir -p "dist/$name"
+            cp build/blob/dinput8.dll "build/blob/$blob" README.md "dist/$name/"
+            (cd "dist/$name" && sha256sum dinput8.dll "$blob" README.md > SHA256SUMS)
+            cp "build/blob/blob_report-$target.json" dist/
+            (cd dist && python -m zipfile -c "$name.zip" "$name")
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: modernizer-bfme2-1.06
+          name: modernizer
           path: |
-            dist/${{ env.PACKAGE }}.zip
-            dist/${{ env.PACKAGE }}/SHA256SUMS
-            dist/blob_report.json
+            dist/*.zip
+            dist/*/SHA256SUMS
+            dist/blob_report-*.json
           if-no-files-found: error
           retention-days: 30
 
@@ -70,23 +74,28 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: modernizer-bfme2-1.06
+          name: modernizer
           path: dist
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          name="modernizer-$TAG-bfme2-1.06"
           {
-            echo "BFME II 1.06 modernizer built from ${GITHUB_SHA} by the Build workflow."
+            echo "BFME II modernizer built from ${GITHUB_SHA} by the Build workflow. Take the zip for your game:"
             echo
-            echo "Copy dinput8.dll and bfme2-modern-106.blob from the zip into the BFME II 1.06 game folder; README.md inside lists settings and limits."
+            echo "- \`modernizer-$TAG-bfme2-106.zip\`: BFME II 1.06"
+            echo "- \`modernizer-$TAG-bfme2-109.zip\`: BFME II 1.09 (community patch)"
+            echo "- \`modernizer-$TAG-rotwk-201.zip\`: The Rise of the Witch-king 2.01"
             echo
-            echo '```'
-            cat "dist/$name/SHA256SUMS"
-            echo '```'
+            echo "Copy dinput8.dll and the .blob from the zip into the game folder, next to game.dat; README.md inside lists settings and limits."
+            for f in dist/modernizer-*/SHA256SUMS; do
+              echo
+              echo "$(basename "$(dirname "$f")"):"
+              echo '```'
+              cat "$f"
+              echo '```'
+            done
           } > notes.md
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
-            --title "BFME II modernizer $TAG (1.06)" --notes-file notes.md \
-            "dist/$name.zip" dist/blob_report.json
+            --title "BFME II modernizer $TAG" --notes-file notes.md dist/*.zip dist/blob_report-*.json

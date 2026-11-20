@@ -1,0 +1,169 @@
+diff --git a/Code/GameEngine/Include/Common/GameState.h b/Code/GameEngine/Include/Common/GameState.h
+index 716c27e18e7..94189378d1f 100644
+--- a/Code/GameEngine/Include/Common/GameState.h
++++ b/Code/GameEngine/Include/Common/GameState.h
+@@ -69,7 +69,12 @@ public:
+     AsciiString m_pristineMapName;
+     char m_opaque30[0x48 - 0x30];
+     int m_saveFileType;
++#if defined(BFME2_LAYOUT_201)
++    // The RotWK 2.01 engine's +0x24 save-info member is 0x60 bytes longer.
++    char m_opaque4C[0xE0C - 0x4C + 0x60];
++#else
+     char m_opaque4C[0xE0C - 0x4C];
++#endif
+     void *field0E0C;
+     void *field0E10;
+     unsigned field0E14;
+diff --git a/Code/GameEngine/Include/Common/GlobalData.h b/Code/GameEngine/Include/Common/GlobalData.h
+index a740781ea7c..eb15c38a094 100644
+--- a/Code/GameEngine/Include/Common/GlobalData.h
++++ b/Code/GameEngine/Include/Common/GlobalData.h
+@@ -829,8 +829,16 @@ public:
+     bool m_playIntro;
+     unsigned char field0AF3;
+     unsigned char field0AF4;
++#if defined(BFME2_LAYOUT_201)
++    // The RotWK 2.01 engine has one more bool here (its constructor clears
++    // +0xAF3..+0xAF6); W3DDisplay reads the next one at +0xAF6.
++    unsigned char field0AF5_201;
++    unsigned char field0AF5;
++    unsigned char storage0AF7[0x1];
++#else
+     unsigned char field0AF5;
+     unsigned char storage0AF6[0x2];
++#endif
+     float m_keyboardScrollSpeedFactor;
+     float m_keyboardDefaultScrollSpeedFactor;
+     unsigned char field0B00;
+diff --git a/Code/GameEngine/Include/GameClient/TreeHintOpaque0043671B.h b/Code/GameEngine/Include/GameClient/TreeHintOpaque0043671B.h
+index 9ddd5068b3d..44041f3dcaa 100644
+--- a/Code/GameEngine/Include/GameClient/TreeHintOpaque0043671B.h
++++ b/Code/GameEngine/Include/GameClient/TreeHintOpaque0043671B.h
+@@ -25,11 +25,20 @@ struct TreeHintOpaque0043671B
+ 
+     UnicodeString m_text;
+     BfmeSubobject0022CE19 m_subobject;
++#if defined(BFME2_LAYOUT_201)
++    // The RotWK 2.01 engine's +4 member is 0x60 bytes longer (record 0xE54
++    // bytes: SUB ESP/RET E54); only out-of-line code touches it.
++    char m_subobjectTail201[0x60];
++#endif
+     unsigned int m_wordDEC;
+     unsigned int m_wordDF0;
+ };
+ 
+ typedef char BfmeTreeHintMemberExtent[(sizeof(BfmeSubobject0022CE19) == 0xDE8) ? 1 : -1];
++#if defined(BFME2_LAYOUT_201)
++typedef char BfmeTreeHintExtent[(sizeof(TreeHintOpaque0043671B) == 0xE54) ? 1 : -1];
++#else
+ typedef char BfmeTreeHintExtent[(sizeof(TreeHintOpaque0043671B) == 0xDF4) ? 1 : -1];
++#endif
+ 
+ #endif
+diff --git a/Code/GameEngine/Source/Common/System/SaveGame/GameStateLoadGame.cpp b/Code/GameEngine/Source/Common/System/SaveGame/GameStateLoadGame.cpp
+index e92fe9f8d72..fcdd677c578 100644
+--- a/Code/GameEngine/Source/Common/System/SaveGame/GameStateLoadGame.cpp
++++ b/Code/GameEngine/Source/Common/System/SaveGame/GameStateLoadGame.cpp
+@@ -25,7 +25,11 @@
+ #include "../../GameLogicObjectLookupView.h"
+ extern GameLogic *TheGameLogic;
+ #include "../../../../Include/GameClient/TreeHintOpaque0043671B.h"
++#if defined(BFME2_LAYOUT_201)
++typedef char RecordExtent[(sizeof(TreeHintOpaque0043671B)==0xE54)?1:-1];
++#else
+ typedef char RecordExtent[(sizeof(TreeHintOpaque0043671B)==0xDF4)?1:-1];
++#endif
+ class Rva0004224C {
+ public:
+  Rva0004224C *rva0004224C();
+diff --git a/Code/GameEngineDevice/Source/W3DDevice/GameClient/Drawable/Draw/W3DModelDrawDoDrawModule.cpp b/Code/GameEngineDevice/Source/W3DDevice/GameClient/Drawable/Draw/W3DModelDrawDoDrawModule.cpp
+index b63a6817b66..dbc54685434 100644
+--- a/Code/GameEngineDevice/Source/W3DDevice/GameClient/Drawable/Draw/W3DModelDrawDoDrawModule.cpp
++++ b/Code/GameEngineDevice/Source/W3DDevice/GameClient/Drawable/Draw/W3DModelDrawDoDrawModule.cpp
+@@ -88,9 +88,18 @@ public:
+ 	SLOT(08) SLOT(09) SLOT(10)
+ 	virtual bool isHidden();
+ };
++#if defined(BFME2_LAYOUT_201)
++// The RotWK 2.01 engine's Object is 8 bytes longer before +0x250 and 0x20
++// before +0x438.
++#define BFME2_OBJECT_201_A 8
++#define BFME2_OBJECT_201_B 0x18
++#else
++#define BFME2_OBJECT_201_A 0
++#define BFME2_OBJECT_201_B 0
++#endif
+ struct DoDrawSlaveOwner
+ {
+-	char m_pad00[0x250];
++	char m_pad00[0x250 + BFME2_OBJECT_201_A];
+ 	DoDrawSlaveView *m_slave;
+ };
+ struct DoDrawUpdateView
+@@ -105,9 +114,9 @@ class Object
+ public:
+ 	char m_pad00[0x1C0];
+ 	Real m_orientation;
+-	char m_pad1C4[0x274 - 0x1C4];
++	char m_pad1C4[0x274 - 0x1C4 + BFME2_OBJECT_201_A];
+ 	DoDrawSlaveOwner *m_owner274;
+-	char m_pad278[0x438 - 0x278];
++	char m_pad278[0x438 - 0x278 + BFME2_OBJECT_201_B];
+ 	unsigned char m_flags438;
+ };
+ #include "../../../../../Include/W3DDevice/GameClient/Gen_0075EF90.h"
+diff --git a/Code/GameEngineDevice/Source/W3DDevice/GameClient/GUI/W3DAptAux.cpp b/Code/GameEngineDevice/Source/W3DDevice/GameClient/GUI/W3DAptAux.cpp
+index ac4f0187dc9..f547135e2e4 100644
+--- a/Code/GameEngineDevice/Source/W3DDevice/GameClient/GUI/W3DAptAux.cpp
++++ b/Code/GameEngineDevice/Source/W3DDevice/GameClient/GUI/W3DAptAux.cpp
+@@ -325,12 +325,33 @@ void Rva000A92B0SetMatrix(const AptRenderTransform *input) {
+   aptScaleY=stage.y ? (float)device.y/(float)stage.y : 1.0f;
+ #if defined(BFME2_MODERN)
+   g_modernAptOffsetX=g_modernAptOffsetY=0.0f;
++#if defined(BFME2_LAYOUT_201)
++  // The stage is drawn in a centred box. BFME II 1.09's HUD art (Palantir,
++  // SpellStore, InGameHeroSelect) is pre-squeezed by 0.75 to look right
++  // stretched to 16:9, so its build (BFME2_HUD_169) defaults to a 16:9 box;
++  // RotWK's art is 4:3. BFME2_MODERN_HUD=4:3 or 16:9 overrides.
++  if(stage.x && stage.y && modernAptKeepAspect()) {
++   const char *option=getenv("BFME2_MODERN_HUD");
++#if defined(BFME2_HUD_169)
++   float box=(option && strcmp(option,"4:3")==0) ? (float)stage.x/(float)stage.y : 16.0f/9.0f;
++#else
++   float box=(option && strcmp(option,"16:9")==0) ? 16.0f/9.0f : (float)stage.x/(float)stage.y;
++#endif
++   float h=(float)device.y, w=h*box;
++   if(w>(float)device.x) { w=(float)device.x; h=w/box; }
++   aptScaleX=w/(float)stage.x;
++   aptScaleY=h/(float)stage.y;
++   g_modernAptOffsetX=((float)device.x-w)*0.5f;
++   g_modernAptOffsetY=((float)device.y-h)*0.5f;
++  }
++#else
+   if(stage.x && stage.y && modernAptKeepAspect()) {
+    float uniform=aptScaleX<aptScaleY ? aptScaleX : aptScaleY;
+    aptScaleX=aptScaleY=uniform;
+    g_modernAptOffsetX=((float)device.x-(float)stage.x*uniform)*0.5f;
+    g_modernAptOffsetY=((float)device.y-(float)stage.y*uniform)*0.5f;
+   }
++#endif
+ #endif
+   aptInvScaleX=aptScaleX ? 1.0f/aptScaleX : 1.0f;
+   aptInvScaleY=aptScaleY ? 1.0f/aptScaleY : 1.0f;
+diff --git a/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DDisplay.cpp b/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DDisplay.cpp
+index e0e2cbdc484..9990da4a2fc 100644
+--- a/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DDisplay.cpp
++++ b/Code/GameEngineDevice/Source/W3DDevice/GameClient/W3DDisplay.cpp
+@@ -1478,7 +1478,11 @@ bool W3DDisplay::rva0004A462(unsigned int now)
+         if (TWGD[0xd36] == 0 && TWGD[0xb6f] == 0 &&
+             WW3D::Begin_Render(true, true, m_20, *(float *)(TERRAIN + 0x37e8)))
+         {
++#if defined(BFME2_LAYOUT_201)
++            if (TWGD[0xaf6] == 1) // GlobalData's field0AF5 sits one byte later in the 2.01 engine
++#else
+             if (TWGD[0xaf5] == 1)
++#endif
+             {
+                 WINDOWMODE = 1;
+                 SYS(TheInGameUI)->s30();
